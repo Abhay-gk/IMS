@@ -1,0 +1,227 @@
+[
+  {
+    "scenario": "RDBMS Outage - P0 Severity",
+    "description": "Primary database connection failure with cascading replica issues",
+    "signals": [
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440000",
+        "component_id": "RDBMS_PRIMARY_01",
+        "component_type": "RDBMS",
+        "error_type": "CONNECTION_REFUSED",
+        "message": "Failed to establish connection to primary database node",
+        "payload": {
+          "host": "db-primary.us-east-1.internal",
+          "port": 5432,
+          "error_code": "ECONNREFUSED",
+          "attempts": 3
+        },
+        "timestamp": "2026-05-04T10:00:00Z",
+        "source_ip": "10.0.1.42",
+        "latency_ms": 5000.0
+      },
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440001",
+        "component_id": "RDBMS_REPLICA_01",
+        "component_type": "RDBMS",
+        "error_type": "REPLICATION_LAG",
+        "message": "Replica lagging behind primary by 15 minutes",
+        "payload": {
+          "lag_seconds": 900,
+          "max_allowed_lag": 300,
+          "primary_lsn": "0/3D123456",
+          "replica_lsn": "0/3D000000"
+        },
+        "timestamp": "2026-05-04T10:00:05Z",
+        "source_ip": "10.0.1.43",
+        "latency_ms": 2500.0
+      }
+    ]
+  },
+  {
+    "scenario": "Cascading Failure - RDBMS to Cache to API",
+    "description": "Single point of failure propagates through dependent services",
+    "signals": [
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440002",
+        "component_id": "RDBMS_PRIMARY_01",
+        "component_type": "RDBMS",
+        "error_type": "CONNECTION_TIMEOUT",
+        "message": "Connection pool exhausted, timeout after 30s",
+        "payload": {
+          "pool_size": 20,
+          "active_connections": 20,
+          "waiting_connections": 150,
+          "timeout_ms": 30000
+        },
+        "timestamp": "2026-05-04T10:05:00Z",
+        "source_ip": "10.0.2.50",
+        "latency_ms": 30000.0
+      },
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440003",
+        "component_id": "CACHE_CLUSTER_01",
+        "component_type": "CACHE",
+        "error_type": "TIMEOUT",
+        "message": "Redis operation timeout - read operation exceeded 5s",
+        "payload": {
+          "operation": "GET",
+          "key_pattern": "user_session:*",
+          "timeout_ms": 5000,
+          "queue_depth": 45000
+        },
+        "timestamp": "2026-05-04T10:05:05Z",
+        "source_ip": "10.0.2.51",
+        "latency_ms": 5000.0
+      },
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440004",
+        "component_id": "API_GATEWAY_EU",
+        "component_type": "API",
+        "error_type": "503_SERVICE_UNAVAILABLE",
+        "message": "Upstream service unavailable - all backend instances failing",
+        "payload": {
+          "healthy_instances": 0,
+          "total_instances": 10,
+          "http_status": 503,
+          "circuit_breaker_state": "OPEN"
+        },
+        "timestamp": "2026-05-04T10:05:10Z",
+        "source_ip": "10.0.2.52",
+        "latency_ms": 60000.0
+      }
+    ]
+  },
+  {
+    "scenario": "Data Corruption Detection - P0 Severity",
+    "description": "Highest severity: database integrity check failure requires immediate intervention",
+    "signals": [
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440005",
+        "component_id": "RDBMS_PRIMARY_01",
+        "component_type": "RDBMS",
+        "error_type": "DATA_CORRUPTION",
+        "message": "INTEGRITY CHECK FAILED: Checksum mismatch detected",
+        "payload": {
+          "table": "work_items",
+          "rows_affected": 1250,
+          "expected_checksum": "abc123def456",
+          "actual_checksum": "xyz789uvw012",
+          "recovery_level": "CRITICAL"
+        },
+        "timestamp": "2026-05-04T10:10:00Z",
+        "source_ip": "10.0.3.60",
+        "latency_ms": 8000.0
+      },
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440006",
+        "component_id": "RDBMS_BACKUP_01",
+        "component_type": "RDBMS",
+        "error_type": "DATA_CORRUPTION",
+        "message": "Backup verification failed - corruption detected in backup set",
+        "payload": {
+          "backup_id": "backup_2026_05_04_0900",
+          "corrupted_blocks": 45,
+          "total_blocks": 50000,
+          "backup_age_hours": 3
+        },
+        "timestamp": "2026-05-04T10:10:05Z",
+        "source_ip": "10.0.3.61",
+        "latency_ms": 12000.0
+      }
+    ]
+  },
+  {
+    "scenario": "Slow Degradation - P2/P3 Severity",
+    "description": "Gradual increase in latency without hard failures - slow burn detection",
+    "signals": [
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440007",
+        "component_id": "CACHE_CLUSTER_01",
+        "component_type": "CACHE",
+        "error_type": "HIGH_LATENCY",
+        "message": "Operation latency elevated: 95th percentile at 800ms",
+        "payload": {
+          "p50_latency_ms": 150,
+          "p95_latency_ms": 800,
+          "p99_latency_ms": 1500,
+          "sla_target_ms": 100,
+          "sla_breach_percentage": 12.5
+        },
+        "timestamp": "2026-05-04T10:15:00Z",
+        "source_ip": "10.0.4.70",
+        "latency_ms": 800.0
+      },
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440008",
+        "component_id": "API_GATEWAY_EU",
+        "component_type": "API",
+        "error_type": "REQUEST_TIMEOUT",
+        "message": "Request timeout - response time exceeded SLA threshold",
+        "payload": {
+          "request_id": "req_ABC123XYZ789",
+          "endpoint": "POST /api/work_items",
+          "response_time_ms": 3200,
+          "sla_limit_ms": 2000,
+          "percentile_affected": 8.3
+        },
+        "timestamp": "2026-05-04T10:15:30Z",
+        "source_ip": "10.0.4.71",
+        "latency_ms": 3200.0
+      }
+    ]
+  },
+  {
+    "scenario": "Multi-Region Failure - Distributed System Outage",
+    "description": "Simultaneous failures across EU, US, and APAC regions",
+    "signals": [
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440009",
+        "component_id": "RDBMS_EU_01",
+        "component_type": "RDBMS",
+        "error_type": "CONNECTION_REFUSED",
+        "message": "EU Region database unreachable",
+        "payload": {
+          "region": "eu-west-1",
+          "availability_zone": "eu-west-1a",
+          "network_path": "UNAVAILABLE",
+          "failover_status": "INITIATED"
+        },
+        "timestamp": "2026-05-04T10:20:00Z",
+        "source_ip": "10.0.10.1",
+        "latency_ms": 5000.0
+      },
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440010",
+        "component_id": "RDBMS_US_01",
+        "component_type": "RDBMS",
+        "error_type": "CONNECTION_REFUSED",
+        "message": "US Region database unreachable",
+        "payload": {
+          "region": "us-east-1",
+          "availability_zone": "us-east-1c",
+          "network_path": "UNAVAILABLE",
+          "failover_status": "INITIATED"
+        },
+        "timestamp": "2026-05-04T10:20:03Z",
+        "source_ip": "10.0.10.2",
+        "latency_ms": 5000.0
+      },
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440011",
+        "component_id": "RDBMS_APAC_01",
+        "component_type": "RDBMS",
+        "error_type": "CONNECTION_REFUSED",
+        "message": "APAC Region database unreachable",
+        "payload": {
+          "region": "ap-southeast-1",
+          "availability_zone": "ap-southeast-1b",
+          "network_path": "UNAVAILABLE",
+          "failover_status": "INITIATED"
+        },
+        "timestamp": "2026-05-04T10:20:06Z",
+        "source_ip": "10.0.10.3",
+        "latency_ms": 5000.0
+      }
+    ]
+  }
+]
