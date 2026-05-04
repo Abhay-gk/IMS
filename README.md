@@ -82,7 +82,7 @@ High-throughput ingestion with non-blocking async design:
 graph LR
     Input["Incoming Signal<br/>10k/sec Target"]
     
-    subgraph Processing["Fast Path ~50ms"]
+    subgraph Processing["Fast Path 50ms"]
         RateLimit["Rate Limit Check<br/>Redis Counter"]
         Debounce["Debounce<br/>Redis SETNX"]
         DBWrite["Create/Increment<br/>Work Item<br/>PostgreSQL"]
@@ -95,13 +95,13 @@ graph LR
     
     Output["HTTP 202<br/>Accepted"]
     
-    Input -->|O(1) op| RateLimit
+    Input -->|Constant time| RateLimit
     RateLimit -->|Atomic| Debounce
     Debounce -->|Transaction| DBWrite
     DBWrite --> Output
     
-    DBWrite -.->|Fire & Forget| MongoWrite
-    DBWrite -.->|Fire & Forget| MetricsWrite
+    DBWrite -.->|Async task| MongoWrite
+    DBWrite -.->|Async task| MetricsWrite
     
     style Processing fill:#e1f5ff
     style Async fill:#f3e5f5
@@ -155,33 +155,33 @@ Specialized storage for different access patterns:
 
 ```mermaid
 graph TB
-    subgraph PostgreSQL["PostgreSQL - Transactional"]
+    subgraph PG["PostgreSQL - Transactional"]
         WI["work_items<br/>Incident state"]
         RCA["rca_records<br/>Root cause analysis"]
         Metrics["signal_metrics<br/>Time-series data"]
     end
     
-    subgraph MongoDB["MongoDB - Audit Log"]
-        Signals["signals collection<br/>Raw immutable data<br/>TTL=30 days"]
+    subgraph Mongo["MongoDB - Audit Log"]
+        Signals["signals collection<br/>Raw immutable data<br/>TTL 30 days"]
     end
     
-    subgraph Redis["Redis - Cache & State"]
-        RateLimit["rate_limit:{ip}"]
-        Debounce["debounce:{component_id}"]
+    subgraph Redis["Redis - Cache and State"]
+        RateLimitNode["rate_limit counter"]
+        DebounceNode["debounce tracker"]
     end
     
     API["API Layer"]
     
     API -->|Insert Work Item| WI
-    API -->|Rate Check| RateLimit
-    API -->|Debounce Check| Debounce
+    API -->|Rate Check| RateLimitNode
+    API -->|Debounce Check| DebounceNode
     API -->|Queue| Signals
     API -->|RCA Submit| RCA
     WI -->|Query for UI| API
     Signals -->|Audit Trail| API
     
-    style PostgreSQL fill:#bbdefb
-    style MongoDB fill:#f1f8e9
+    style PG fill:#bbdefb
+    style Mongo fill:#f1f8e9
     style Redis fill:#ffe0b2
 ```
 
