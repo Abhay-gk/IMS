@@ -254,6 +254,321 @@ async def critical_operation():
 
 ---
 
+## Low-Level Design (LLD) - Code Architecture & Concurrency
+
+### Concurrency & Race Condition Prevention
+
+#### 1. Distributed Debouncing Lock (Redis SETNX)
+
+**Problem**: Multiple workers might create duplicate incidents for same component  
+**Solution**: Atomic Redis operation - `SETNX` (SET if Not eXists)
+
+```python
+# backend/services/ingestion.py
+async def handle_debounce(redis: Redis, signal: SignalPayload):
+    key = f"debounce:{signal.component_id}"
+    
+    # Atomic operation: Only ONE worker succeeds
+    created = await redis.setnx(key, 1, ex=10)
+    
+    if created:
+        # This worker won the race → create new work item
+        work_item = await create_work_item(signal)
+        return work_item.id
+    else:
+        # Another worker created it → increment counter
+        existing_id = await get_work_item_id_for_component(signal.component_id)
+        await increment_signal_count(existing_id)
+        return existing_id
+```
+
+**Why This Works**:
+- Redis SETNX is atomic at server level
+- No race condition window
+- Works across multiple backend instances
+- TTL (10s) provides automatic cleanup
+- O(1) operation - no performance impact
+
+#### 2. Async Context Manager for Connection Pooling
+
+**Problem**: Database connections are limited resource; need efficient reuse  
+**Solution**: AsyncContext manager with lifespan pattern
+
+```python
+# backend/main.py
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Create connection pools
+    app.pg_pool = await asyncpg.create_pool(
+        dsn=settings.postgres_dsn,
+        min_size=5,           # Pre-allocated connections
+        max_size=20,          # Max concurrent connections
+        command_timeout=30    # Prevent hanging queries
+    )
+    app.mongo_db = await AsyncIOMotorClient(settings.mongo_uri).db_name
+    app.redis_client = await aioredis.create_redis_pool(
+        f"redis://{settings.redis_host}:{settings.redis_port}"
+    )
+    
+    # Run application
+    yield
+    
+    # Cleanup: Close all pools
+    app.pg_pool.close()
+    await app.mongo_db.client.close()
+    app.redis_client.close()
+```
+
+**Benefits**:
+- Connection reuse: No connection creation overhead per request
+- Built-in queue: Waits for available connection if all busy
+- Automatic timeout: Prevents connection exhaustion
+- Clean resource management: All closed on shutdown
+
+#### 3. Atomic Work Item State Transitions
+
+**Problem**: Multiple API calls trying to change status; need to prevent invalid sequences  
+**Solution**: Database transaction with state validation
+
+```python
+# backend/services/workflow.py
+async def transition_status(
+    pool: asyncpg.Pool,
+    work_item_id: UUID,
+    new_status: str
+) -> bool:
+    async with pool.acquire() as conn:
+        async with conn.transaction():  # ACID transaction
+            # Step 1: Read current state (locked row)
+            current = await conn.fetchrow(
+                'SELECT status FROM work_items WHERE id = $1 FOR UPDATE',
+                work_item_id
+            )
+            
+            # Step 2: Validate transition
+            if new_status == "CLOSED":
+                rca = await conn.fetchrow(
+                    'SELECT id FROM rca_records WHERE work_item_id = $1',
+                    work_item_id
+                )
+                if not rca:
+                    raise ValueError("Cannot close without RCA")
+            
+            # Step 3: Update (write lock held until commit)
+            await conn.execute(
+                'UPDATE work_items SET status = $1, updated_at = NOW() WHERE id = $2',
+                new_status,
+                work_item_id
+            )
+            
+            # Transaction commits here - atomicity guaranteed
+```
+
+**Why This Works**:
+- `FOR UPDATE` acquires row lock
+- Other requests wait for lock (no dirty reads)
+- Validation inside transaction (consistent view)
+- Atomicity: Either all changes or none
+- ACID guarantees prevent race conditions
+
+#### 4. Non-Blocking Background Tasks (Fire-and-Forget)
+
+**Problem**: Signal ingestion should be fast; but need to write to MongoDB + metrics  
+**Solution**: Async tasks scheduled but not awaited
+
+```python
+# backend/api/routers.py
+@router.post("/api/signals", status_code=202)
+async def ingest_signals(batch: SignalBatch, request: Request):
+    # Fast synchronous work (Redis checks, PostgreSQL increment)
+    work_items_created = await process_signals_sync(batch, request)
+    
+    # Slow work scheduled in background
+    for signal in batch.signals:
+        asyncio.create_task(insert_signal_to_mongo(signal))  # Fire & forget
+        asyncio.create_task(record_timeseries_metric(signal))
+    
+    # Return immediately (< 50ms) while background tasks continue
+    return {
+        "status": "accepted",
+        "count": len(batch.signals),
+        "work_items_created": len(work_items_created)
+    }
+```
+
+**Why This Works**:
+- HTTP client gets response immediately
+- Background tasks run in application event loop
+- No blocking on I/O
+- Graceful degradation: Failed background tasks don't affect response
+- Configurable: Can use task queues (Celery, RQ) for production
+
+### Data Handling & Separation Strategy
+
+#### PostgreSQL: Transactional Data (Source of Truth)
+
+```
+Purpose: ACID-compliant incident management
+Tables:  work_items, rca_records, signal_metrics (hypertable)
+Pattern: Normalized schema, strong consistency, FOREIGN KEYS
+
+Access Pattern:
+- Frequent updates (status changes, signal count increments)
+- Consistent reads (always fresh data for UI)
+- Strong consistency requirement (can't close without RCA)
+- Small-medium dataset (thousands of incidents, not billions)
+
+Best Practice: Use connection pool (5-20) for concurrent requests
+```
+
+#### MongoDB: Audit Log (Data Lake)
+
+```
+Purpose: Immutable, schema-flexible audit trail
+Collection: signals (raw JSON documents)
+Pattern: Document store, eventual consistency, TTL-based retention
+
+Access Pattern:
+- High-volume writes (10k signals/sec)
+- Bulk insert optimization (batch mode)
+- Time-series queries (signals for specific incident)
+- Append-only (no updates - immutability)
+- Automatic cleanup (TTL: 30 days)
+
+Best Practice: Use bulk insert for batching, indexes on component_id + timestamp
+```
+
+#### Redis: State & Cache
+
+```
+Purpose: Distributed state, rate limiting, debouncing
+Data: rate_limit:{ip}, debounce:{component_id}, metric counters
+Pattern: Key-value store, atomic operations, TTL-based expiry
+
+Access Pattern:
+- Microsecond latency (sub-ms checks)
+- Atomic operations (SETNX, INCR)
+- Distributed across instances (shared state)
+- Eventual consistency acceptable (cache can be wrong)
+
+Best Practice: Use connection pool, handle connection failures gracefully
+```
+
+### Code-Level Best Practices
+
+#### 1. Type Hints & Validation (Pydantic)
+
+```python
+# backend/models/schemas.py
+from pydantic import BaseModel, Field, validator
+from enum import Enum
+from uuid import UUID
+from datetime import datetime
+
+class ComponentType(str, Enum):
+    RDBMS = "RDBMS"
+    CACHE = "CACHE"
+    API = "API"
+
+class Severity(str, Enum):
+    P0 = "P0"  # Critical - immediate action
+    P1 = "P1"  # High    - urgent
+    P2 = "P2"  # Medium  - soon
+    P3 = "P3"  # Low     - backlog
+
+class SignalPayload(BaseModel):
+    signal_id: UUID
+    component_id: str = Field(..., min_length=1, max_length=255)
+    component_type: ComponentType
+    error_type: str = Field(..., min_length=1, max_length=100)
+    message: str
+    latency_ms: float = Field(..., ge=0)
+    timestamp: datetime
+    source_ip: str = Field(..., regex=r"^\d+\.\d+\.\d+\.\d+$")
+    
+    @validator('timestamp')
+    def timestamp_not_future(cls, v):
+        if v > datetime.utcnow():
+            raise ValueError('Timestamp cannot be in future')
+        return v
+```
+
+**Benefits**:
+- Automatic input validation
+- Type safety (IDE autocomplete works)
+- Clear API contracts
+- Self-documenting code
+- Automatic OpenAPI schema generation
+
+#### 2. Exception Handling with Context
+
+```python
+# backend/services/ingestion.py
+import logging
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+logger = logging.getLogger(__name__)
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.1, min=0.1, max=1),
+    reraise=True
+)
+async def insert_signal_with_retry(mongo_db, signal_dict: dict):
+    try:
+        result = await mongo_db["signals"].insert_one(signal_dict)
+        logger.info(f"Signal inserted: {result.inserted_id}")
+        return result.inserted_id
+    except pymongo.errors.DuplicateKeyError as e:
+        logger.error(f"Duplicate signal: {signal_dict['signal_id']}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Failed to insert signal", exc_info=True)
+        raise
+```
+
+**Benefits**:
+- Automatic retry with exponential backoff
+- Detailed logging with context
+- Distinguishes error types (duplicate vs network)
+- Stack traces preserved with exc_info=True
+
+#### 3. Async/Await Pattern for Non-Blocking I/O
+
+```python
+# backend/api/routers.py
+@router.get("/api/work_items")
+async def get_work_items(
+    pool: asyncpg.Pool = Depends(get_pg_pool),
+    limit: int = Query(50, le=500),
+    offset: int = Query(0, ge=0)
+) -> Dict:
+    # Async query - doesn't block event loop
+    rows = await pool.fetch(
+        'SELECT * FROM work_items ORDER BY created_at DESC LIMIT $1 OFFSET $2',
+        limit,
+        offset
+    )
+    
+    total = await pool.fetchval('SELECT COUNT(*) FROM work_items')
+    
+    # Both queries run concurrently with other requests
+    return {
+        "items": [dict(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+```
+
+**Benefits**:
+- Single-threaded but handles thousands of concurrent requests
+- I/O doesn't block other requests
+- Lower memory footprint than threading
+- Better latency (no context switching)
+
+---
+
 ## Database Schema Design
 
 ### work_items Table
