@@ -116,17 +116,17 @@ Enforced workflow with mandatory RCA before closure:
 stateDiagram-v2
     [*] --> OPEN: Signal Detected
     
-    OPEN --> INVESTIGATING: Assigned for<br/>Investigation
+    OPEN --> INVESTIGATING: Assigned
     
-    INVESTIGATING --> RESOLVED: Root Cause<br/>Identified
+    INVESTIGATING --> RESOLVED: Root Cause Found
     
-    RESOLVED --> CLOSED: RCA Submitted<br/>+ Validation Pass
+    RESOLVED --> CLOSED: RCA Submitted
     
-    INVESTIGATING -.->|Emergency| OPEN: Reopen if<br/>Escalation
+    INVESTIGATING --> OPEN: Emergency Reopen
     
-    RESOLVED -.->|RCA Invalid| INVESTIGATING: Fix RCA<br/>Issues
+    RESOLVED --> INVESTIGATING: RCA Invalid
     
-    CLOSED --> [*]: Incident Closed<br/>MTTR Recorded
+    CLOSED --> [*]: Closed
     
     note right of OPEN
         Signal deduplication
@@ -134,8 +134,8 @@ stateDiagram-v2
     end note
     
     note right of INVESTIGATING
-        Triage and root cause
-        finding phase
+        Triage and investigation
+        phase
     end note
     
     note right of RESOLVED
@@ -145,7 +145,7 @@ stateDiagram-v2
     
     note right of CLOSED
         RCA complete
-        MTTR calculated
+        MTTR recorded
     end note
 ```
 
